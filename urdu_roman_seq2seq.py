@@ -374,7 +374,7 @@ def main():
     print("=" * 60)
     
     # Load and preprocess data
-    pairs = load_data('final_cleaned_urdu_roman_urdu_pairs.txt')
+    pairs = load_data('./normalized_dataset/filtered_urdu_roman_urdu_pairs.txt')
     pairs = preprocess_data(pairs, max_pairs=5000)  # Use subset for faster training
     
     # Split data
