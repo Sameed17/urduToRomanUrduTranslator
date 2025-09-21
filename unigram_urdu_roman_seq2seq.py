@@ -864,9 +864,6 @@ def main():
     
     print("\nModel and tokenizers saved!")
     print("Training completed successfully!")
-    print(evaluation_results)
-    
-    return evaluation_results
 
 if __name__ == "__main__":
     main()
