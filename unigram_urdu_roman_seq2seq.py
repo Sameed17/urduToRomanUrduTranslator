@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
-"""
-Unigram Tokenizer-based Seq2Seq Model for Urdu to Roman Urdu Translation
-Using Unigram tokenization (better than BPE for many languages)
-"""
 
+import os
+import shutil
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -15,6 +13,11 @@ import pickle
 import random
 from sklearn.model_selection import train_test_split
 import math
+
+"""
+Unigram Tokenizer-based Seq2Seq Model for Urdu to Roman Urdu Translation
+Using Unigram tokenization (better than BPE for many languages)
+"""
 
 # Set random seeds for reproducibility
 torch.manual_seed(42)
@@ -739,12 +742,12 @@ def evaluate_model(model, test_loader, test_pairs, urdu_tokenizer, roman_tokeniz
     
     
     return {
-        'perplexity': ppl,
+        'ppl': ppl,
         'bleu_1': bleu_1,
         'bleu_2': bleu_2,
         'bleu_3': bleu_3,
         'bleu_4': bleu_4,
-        'bleu_avg': avg_bleu
+        'avg_bleu': avg_bleu
     }
 
 def run_experiments(train_loader, val_loader, urdu_token_to_id, roman_token_to_id, device):
@@ -756,23 +759,23 @@ def run_experiments(train_loader, val_loader, urdu_token_to_id, roman_token_to_i
     experiments = [
         ("Experiment 1", {
             "emb_src": 256, "emb_tgt": 256, "enc_hidden": 512, "dec_hidden": 512,
-            "enc_layers": 2, "dec_layers": 4, "dropout": 0.3, "batch_size": 64, "lr": 1e-3, "epochs": 15
+            "enc_layers": 2, "dec_layers": 2, "dropout": 0.3, "batch_size": 64, "lr": 1e-3, "epochs": 5
         }),
         ("Experiment 2", {
             "emb_src": 128, "emb_tgt": 128, "enc_hidden": 256, "dec_hidden": 256,
-            "enc_layers": 1, "dec_layers": 3, "dropout": 0.3, "batch_size": 64, "lr": 5e-4, "epochs": 15
+            "enc_layers": 4, "dec_layers": 4, "dropout": 0.3, "batch_size": 64, "lr": 5e-4, "epochs": 5
         }),
         ("Experiment 3", {
             "emb_src": 512, "emb_tgt": 512, "enc_hidden": 512, "dec_hidden": 512,
-            "enc_layers": 3, "dec_layers": 4, "dropout": 0.5, "batch_size": 32, "lr": 1e-4, "epochs": 15
+            "enc_layers": 2, "dec_layers": 4, "dropout": 0.5, "batch_size": 32, "lr": 1e-4, "epochs": 5
         }),
         ("Experiment 4", {
             "emb_src": 256, "emb_tgt": 256, "enc_hidden": 512, "dec_hidden": 512,
-            "enc_layers": 3, "dec_layers": 4, "dropout": 0.1, "batch_size": 32, "lr": 1e-3, "epochs": 15
+            "enc_layers": 3, "dec_layers": 4, "dropout": 0.1, "batch_size": 32, "lr": 1e-3, "epochs": 5
         }),
         ("Experiment 5", {
             "emb_src": 128, "emb_tgt": 128, "enc_hidden": 256, "dec_hidden": 256,
-            "enc_layers": 4, "dec_layers": 2, "dropout": 0.5, "batch_size": 128, "lr": 5e-4, "epochs": 15
+            "enc_layers": 2, "dec_layers": 2, "dropout": 0.5, "batch_size": 128, "lr": 5e-4, "epochs": 5
         }),
     ]
     
@@ -814,7 +817,7 @@ def main():
     print("=" * 80)
     
     # Load and preprocess data
-    pairs = load_data('./normalized_dataset/filtered_urdu_roman_urdu_pairs.txt')
+    pairs = load_data('/kaggle/working/dataset/filtered_urdu_roman_urdu_pairs.txt')
     pairs = preprocess_data(pairs, max_pairs=8000)  # Use more data for unigram training
     
     # Split data
@@ -879,7 +882,7 @@ def main():
     print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
     
     # Train model
-    train_losses, val_losses = train_model(model, train_loader, val_loader, num_epochs=15, learning_rate=0.001)
+    train_losses, val_losses = train_model(model, train_loader, val_loader, num_epochs=5, learning_rate=0.001)
     
     # Plot training curves
     plt.figure(figsize=(10, 6))
@@ -912,12 +915,12 @@ def main():
 
     print(f"\nEvaluation Results:")
     print(f"=" * 50)
-    print(f"Perplexity: {evaluation_results["ppl"]:.2f}")
-    print(f"BLEU-1: {evaluation_results["bleu_1"]:.4f}")
-    print(f"BLEU-2: {evaluation_results["bleu_2"]:.4f}")
-    print(f"BLEU-3: {evaluation_results["bleu_3"]:.4f}")
-    print(f"BLEU-4: {evaluation_results["bleu_4"]:.4f}")
-    print(f"Average BLEU: {evaluation_results["avg_bleu"]:.4f}")
+    print(f"Perplexity: {evaluation_results['ppl']:.2f}")
+    print(f"BLEU-1: {evaluation_results['bleu_1']:.4f}")
+    print(f"BLEU-2: {evaluation_results['bleu_2']:.4f}")
+    print(f"BLEU-3: {evaluation_results['bleu_3']:.4f}")
+    print(f"BLEU-4: {evaluation_results['bleu_4']:.4f}")
+    print(f"Average BLEU: {evaluation_results['avg_bleu']:.4f}")
     
     # Save model
     torch.save(model.state_dict(), 'unigram_urdu_roman_seq2seq_model.pth')
@@ -939,7 +942,7 @@ def main():
             loss = nn.CrossEntropyLoss(ignore_index=0)(outputs.reshape(-1, outputs.size(-1)), tgt[:, 1:].reshape(-1))
             test_loss += loss.item()
             test_batches += 1
-    
+            
     avg_test_loss = test_loss / test_batches
     print(f"Test Loss: {avg_test_loss:.4f}")
     torch.save(best_model.state_dict(), 'best_urdu_roman_seq2seq_model.pth')
