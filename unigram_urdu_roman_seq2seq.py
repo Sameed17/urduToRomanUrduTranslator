@@ -13,6 +13,7 @@ import pickle
 import random
 from sklearn.model_selection import train_test_split
 import math
+import time
 
 """
 Unigram Tokenizer-based Seq2Seq Model for Urdu to Roman Urdu Translation
@@ -419,8 +420,8 @@ class Seq2SeqModel(nn.Module):
     
     def __init__(self, encoder, decoder, device):
         super().__init__()
-        self.encoder = encoder
-        self.decoder = decoder
+        self.encoder = encoder.to(device)
+        self.decoder = decoder.to(device)
         self.device = device
         
     def forward(self, src, tgt, teacher_forcing_ratio=0.5):
@@ -491,6 +492,18 @@ def train_model(model, train_loader, val_loader, num_epochs=10, learning_rate=0.
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = model.to(device)
     
+    # Print GPU information
+    if torch.cuda.is_available():
+        print(f"CUDA available: {torch.cuda.is_available()}")
+        print(f"CUDA device count: {torch.cuda.device_count()}")
+        print(f"Current CUDA device: {torch.cuda.current_device()}")
+        print(f"CUDA device name: {torch.cuda.get_device_name()}")
+        print(f"CUDA memory allocated: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
+        print(f"CUDA memory cached: {torch.cuda.memory_reserved() / 1024**3:.2f} GB")
+        
+        # Clear GPU cache
+        torch.cuda.empty_cache()
+    
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
     criterion = nn.CrossEntropyLoss(ignore_index=0)  # Ignore padding tokens
     
@@ -504,9 +517,11 @@ def train_model(model, train_loader, val_loader, num_epochs=10, learning_rate=0.
         model.train()
         train_loss = 0
         train_batches = 0
+        epoch_start_time = time.time()
         
         for batch_idx, (src, tgt) in enumerate(train_loader):
-            src, tgt = src.to(device), tgt.to(device)
+            batch_start_time = time.time()
+            src, tgt = src.to(device, non_blocking=True), tgt.to(device, non_blocking=True)
             
             optimizer.zero_grad()
             
@@ -525,7 +540,12 @@ def train_model(model, train_loader, val_loader, num_epochs=10, learning_rate=0.
             train_batches += 1
             
             if batch_idx % 100 == 0:
-                print(f'Epoch {epoch+1}/{num_epochs}, Batch {batch_idx}, Loss: {loss.item():.4f}')
+                batch_time = time.time() - batch_start_time
+                if torch.cuda.is_available():
+                    gpu_mem = torch.cuda.memory_allocated() / 1024**3
+                    print(f'Epoch {epoch+1}/{num_epochs}, Batch {batch_idx}, Loss: {loss.item():.4f}, GPU Mem: {gpu_mem:.2f}GB, Time: {batch_time:.3f}s')
+                else:
+                    print(f'Epoch {epoch+1}/{num_epochs}, Batch {batch_idx}, Loss: {loss.item():.4f}, Time: {batch_time:.3f}s')
         
         # Validation
         model.eval()
@@ -534,7 +554,7 @@ def train_model(model, train_loader, val_loader, num_epochs=10, learning_rate=0.
         
         with torch.no_grad():
             for src, tgt in val_loader:
-                src, tgt = src.to(device), tgt.to(device)
+                src, tgt = src.to(device, non_blocking=True), tgt.to(device, non_blocking=True)
                 outputs, _ = model(src, tgt, teacher_forcing_ratio=0.0)
                 loss = criterion(outputs.reshape(-1, outputs.size(-1)), tgt[:, 1:].reshape(-1))
                 val_loss += loss.item()
@@ -546,9 +566,14 @@ def train_model(model, train_loader, val_loader, num_epochs=10, learning_rate=0.
         train_losses.append(avg_train_loss)
         val_losses.append(avg_val_loss)
         
+        epoch_time = time.time() - epoch_start_time
         print(f'Epoch {epoch+1}/{num_epochs}:')
         print(f'  Train Loss: {avg_train_loss:.4f}')
         print(f'  Val Loss: {avg_val_loss:.4f}')
+        print(f'  Epoch Time: {epoch_time:.2f}s')
+        if torch.cuda.is_available():
+            gpu_mem = torch.cuda.memory_allocated() / 1024**3
+            print(f'  GPU Memory: {gpu_mem:.2f}GB')
         print('-' * 50)
     
     return train_losses, val_losses
@@ -672,7 +697,7 @@ def calculate_perplexity(model, data_loader, criterion, device):
     
     with torch.no_grad():
         for src, tgt in data_loader:
-            src, tgt = src.to(device), tgt.to(device)
+            src, tgt = src.to(device, non_blocking=True), tgt.to(device, non_blocking=True)
             
             # Forward pass without teacher forcing
             outputs, _ = model(src, tgt, teacher_forcing_ratio=0.0)
@@ -810,11 +835,29 @@ def run_experiments(train_loader, val_loader, urdu_token_to_id, roman_token_to_i
     
     # After all experiments, return the best model
     return best_model, best_experiment, best_val_loss
+def check_gpu_utilization():
+    """Check and display GPU utilization information"""
+    if torch.cuda.is_available():
+        print("GPU Information:")
+        print(f"  CUDA Available: {torch.cuda.is_available()}")
+        print(f"  Device Count: {torch.cuda.device_count()}")
+        print(f"  Current Device: {torch.cuda.current_device()}")
+        print(f"  Device Name: {torch.cuda.get_device_name()}")
+        print(f"  Memory Allocated: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
+        print(f"  Memory Cached: {torch.cuda.memory_reserved() / 1024**3:.2f} GB")
+        print(f"  Max Memory: {torch.cuda.max_memory_allocated() / 1024**3:.2f} GB")
+        print("=" * 50)
+    else:
+        print("CUDA not available - running on CPU")
+        print("=" * 50)
 
 def main():
     """Main training function"""
     print("Starting Urdu to Roman Urdu Translation Training with Unigram Tokenizer")
     print("=" * 80)
+    
+    # Check GPU utilization
+    check_gpu_utilization()
     
     # Load and preprocess data
     pairs = load_data('/kaggle/working/dataset/filtered_urdu_roman_urdu_pairs.txt')
@@ -867,10 +910,13 @@ def main():
     val_dataset = UnigramUrduRomanDataset(val_pairs, urdu_tokenizer, roman_tokenizer)
     test_dataset = UnigramUrduRomanDataset(test_pairs, urdu_tokenizer, roman_tokenizer)
     
-    # Create data loaders
-    train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=32, shuffle=False)
-    test_loader = DataLoader(test_dataset, batch_size=32, shuffle=False)
+    # Create data loaders with optimized settings for GPU
+    train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True, 
+                             num_workers=4, pin_memory=True, persistent_workers=True)
+    val_loader = DataLoader(val_dataset, batch_size=64, shuffle=False, 
+                           num_workers=4, pin_memory=True, persistent_workers=True)
+    test_loader = DataLoader(test_dataset, batch_size=64, shuffle=False, 
+                             num_workers=4, pin_memory=True, persistent_workers=True)
     
     # Create model
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
