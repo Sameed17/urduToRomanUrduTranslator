@@ -736,14 +736,7 @@ def evaluate_model(model, test_loader, test_pairs, urdu_tokenizer, roman_tokeniz
     bleu_4 = np.mean([calculate_bleu_score(test_pairs[i][1], translate(model, test_pairs[i][0], urdu_tokenizer, roman_tokenizer), max_n=4) 
                      for i in range(samples_to_eval)])
     
-    print(f"\nEvaluation Results:")
-    print(f"=" * 50)
-    print(f"Perplexity: {ppl:.2f}")
-    print(f"BLEU-1: {bleu_1:.4f}")
-    print(f"BLEU-2: {bleu_2:.4f}")
-    print(f"BLEU-3: {bleu_3:.4f}")
-    print(f"BLEU-4: {bleu_4:.4f}")
-    print(f"Average BLEU: {avg_bleu:.4f}")
+    
     
     return {
         'perplexity': ppl,
@@ -753,6 +746,67 @@ def evaluate_model(model, test_loader, test_pairs, urdu_tokenizer, roman_tokeniz
         'bleu_4': bleu_4,
         'bleu_avg': avg_bleu
     }
+
+def run_experiments(train_loader, val_loader, urdu_token_to_id, roman_token_to_id, device):
+    """Run the experiments and return the best model."""
+    best_val_loss = float('inf')
+    best_model = None
+    best_experiment = None
+    
+    experiments = [
+        ("Experiment 1", {
+            "emb_src": 256, "emb_tgt": 256, "enc_hidden": 512, "dec_hidden": 512,
+            "enc_layers": 2, "dec_layers": 4, "dropout": 0.3, "batch_size": 64, "lr": 1e-3, "epochs": 15
+        }),
+        ("Experiment 2", {
+            "emb_src": 128, "emb_tgt": 128, "enc_hidden": 256, "dec_hidden": 256,
+            "enc_layers": 1, "dec_layers": 3, "dropout": 0.3, "batch_size": 64, "lr": 5e-4, "epochs": 15
+        }),
+        ("Experiment 3", {
+            "emb_src": 512, "emb_tgt": 512, "enc_hidden": 512, "dec_hidden": 512,
+            "enc_layers": 3, "dec_layers": 4, "dropout": 0.5, "batch_size": 32, "lr": 1e-4, "epochs": 15
+        }),
+        ("Experiment 4", {
+            "emb_src": 256, "emb_tgt": 256, "enc_hidden": 512, "dec_hidden": 512,
+            "enc_layers": 3, "dec_layers": 4, "dropout": 0.1, "batch_size": 32, "lr": 1e-3, "epochs": 15
+        }),
+        ("Experiment 5", {
+            "emb_src": 128, "emb_tgt": 128, "enc_hidden": 256, "dec_hidden": 256,
+            "enc_layers": 4, "dec_layers": 2, "dropout": 0.5, "batch_size": 128, "lr": 5e-4, "epochs": 15
+        }),
+    ]
+    
+    # Loop through experiments
+    for experiment_name, params in experiments:
+        print(f"\nStarting {experiment_name}")
+        print("=" * 50)
+        
+        # Initialize the model with experiment parameters
+        encoder = Encoder(len(urdu_token_to_id), emb_dim=params["emb_src"], hid_dim=params["enc_hidden"], n_layers=params["enc_layers"], dropout=params["dropout"])
+        decoder = Decoder(len(roman_token_to_id), emb_dim=params["emb_tgt"], hid_dim=params["dec_hidden"], n_layers=params["dec_layers"], dropout=params["dropout"])
+        model = Seq2SeqModel(encoder, decoder, device)
+        
+        # Move model to device
+        model = model.to(device)
+        
+        # Train model for current experiment
+        print(f"Training {experiment_name}...")
+        train_losses, val_losses = train_model(model, train_loader, val_loader, num_epochs=params["epochs"], learning_rate=params["lr"])
+        
+        # Evaluate model on validation set to determine if it's the best
+        avg_val_loss = min(val_losses)  # Take the best (lowest) validation loss
+        
+        if avg_val_loss < best_val_loss:
+            best_val_loss = avg_val_loss
+            best_model = model
+            best_experiment = experiment_name, params
+            
+            # Save the best model
+            torch.save(best_model.state_dict(), f'best_model_{experiment_name}.pth')
+            print(f"New best model found and saved from {experiment_name} with validation loss: {best_val_loss:.4f}")
+    
+    # After all experiments, return the best model
+    return best_model, best_experiment, best_val_loss
 
 def main():
     """Main training function"""
@@ -825,8 +879,7 @@ def main():
     print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
     
     # Train model
-    train_losses, val_losses = train_model(model, train_loader, val_loader, 
-                                          num_epochs=15, learning_rate=0.001)
+    train_losses, val_losses = train_model(model, train_loader, val_loader, num_epochs=15, learning_rate=0.001)
     
     # Plot training curves
     plt.figure(figsize=(10, 6))
@@ -855,15 +908,41 @@ def main():
     
     # Evaluate model with BLEU and Perplexity
     print("\n" + "=" * 80)
-    evaluation_results = evaluate_model(model, test_loader, test_pairs, 
-                                      urdu_tokenizer, roman_tokenizer, device, 
-                                      num_samples=100)
+    evaluation_results = evaluate_model(model, test_loader, test_pairs, urdu_tokenizer, roman_tokenizer, device, num_samples=100)
+
+    print(f"\nEvaluation Results:")
+    print(f"=" * 50)
+    print(f"Perplexity: {evaluation_results["ppl"]:.2f}")
+    print(f"BLEU-1: {evaluation_results["bleu_1"]:.4f}")
+    print(f"BLEU-2: {evaluation_results["bleu_2"]:.4f}")
+    print(f"BLEU-3: {evaluation_results["bleu_3"]:.4f}")
+    print(f"BLEU-4: {evaluation_results["bleu_4"]:.4f}")
+    print(f"Average BLEU: {evaluation_results["avg_bleu"]:.4f}")
     
     # Save model
     torch.save(model.state_dict(), 'unigram_urdu_roman_seq2seq_model.pth')
-    
+
     print("\nModel and tokenizers saved!")
     print("Training completed successfully!")
+
+    best_model, best_experiment, best_val_loss = run_experiments(train_loader, val_loader, urdu_token_to_id, roman_token_to_id, device)
+    test_model = best_model  # The best model from the experiments
+    test_loss = 0
+    test_batches = 0
+    
+    # Test model
+    test_model.eval()
+    with torch.no_grad():
+        for src, tgt in test_loader:
+            src, tgt = src.to(device), tgt.to(device)
+            outputs, _ = test_model(src, tgt, teacher_forcing_ratio=0.0)
+            loss = nn.CrossEntropyLoss(ignore_index=0)(outputs.reshape(-1, outputs.size(-1)), tgt[:, 1:].reshape(-1))
+            test_loss += loss.item()
+            test_batches += 1
+    
+    avg_test_loss = test_loss / test_batches
+    print(f"Test Loss: {avg_test_loss:.4f}")
+    torch.save(best_model.state_dict(), 'best_urdu_roman_seq2seq_model.pth')
 
 if __name__ == "__main__":
     main()
