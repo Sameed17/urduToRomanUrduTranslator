@@ -847,147 +847,38 @@ def check_gpu_utilization():
         print("CUDA not available - running on CPU")
         print("=" * 50)
 
-def main():
-    """Main training function"""
-    print("Starting Urdu to Roman Urdu Translation Training with Unigram Tokenizer")
-    print("=" * 80)
-    
-    # Check GPU utilization
-    check_gpu_utilization()
-    
-    # Load and preprocess data
-    pairs = load_data('/kaggle/working/dataset/filtered_urdu_roman_urdu_pairs.txt')
-    pairs = preprocess_data(pairs, max_pairs=8000)  # Use more data for unigram training
-    
-    # Split data
-    train_pairs, test_pairs = train_test_split(pairs, test_size=0.2, random_state=42)
-    train_pairs, val_pairs = train_test_split(train_pairs, test_size=0.1, random_state=42)
-    
-    print(f"Train pairs: {len(train_pairs)}")
-    print(f"Val pairs: {len(val_pairs)}")
-    print(f"Test pairs: {len(test_pairs)}")
-    
-    # Prepare texts for tokenizer training
-    urdu_texts = [pair[0] for pair in train_pairs]
-    roman_texts = [pair[1] for pair in train_pairs]
-    
-    # Train Unigram tokenizers
-    print("\nTraining Unigram tokenizers...")
-    print("=" * 50)
-    
-    urdu_tokenizer = UnigramTokenizer(vocab_size=2000)
-    roman_tokenizer = UnigramTokenizer(vocab_size=2000)
-    
-    urdu_token_to_id, urdu_id_to_token = urdu_tokenizer.train(urdu_texts, num_iterations=8)
-    roman_token_to_id, roman_id_to_token = roman_tokenizer.train(roman_texts, num_iterations=8)
-    
-    # Save tokenizers
-    urdu_tokenizer.save('unigram_urdu_tokenizer.pkl')
-    roman_tokenizer.save('unigram_roman_tokenizer.pkl')
-    
-    print(f"Urdu vocabulary size: {len(urdu_token_to_id)}")
-    print(f"Roman vocabulary size: {len(roman_token_to_id)}")
-    
-    # Show some sample tokens
-    print(f"\nSample Urdu tokens: {list(urdu_tokenizer.vocab)[:20]}")
-    print(f"Sample Roman tokens: {list(roman_tokenizer.vocab)[:20]}")
-    
-    # Test tokenization on a sample
-    sample_urdu = urdu_texts[0]
-    sample_roman = roman_texts[0]
-    print(f"\nSample tokenization:")
-    print(f"Urdu: {sample_urdu}")
-    print(f"Urdu tokens: {urdu_tokenizer.encode(sample_urdu)}")
-    print(f"Roman: {sample_roman}")
-    print(f"Roman tokens: {roman_tokenizer.encode(sample_roman)}")
-    
-    # Create datasets
-    train_dataset = UnigramUrduRomanDataset(train_pairs, urdu_tokenizer, roman_tokenizer)
-    val_dataset = UnigramUrduRomanDataset(val_pairs, urdu_tokenizer, roman_tokenizer)
-    test_dataset = UnigramUrduRomanDataset(test_pairs, urdu_tokenizer, roman_tokenizer)
-    
-    # Create data loaders with optimized settings for GPU
-    train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True, 
-                             num_workers=4, pin_memory=True, persistent_workers=True)
-    val_loader = DataLoader(val_dataset, batch_size=64, shuffle=False, 
-                           num_workers=4, pin_memory=True, persistent_workers=True)
-    test_loader = DataLoader(test_dataset, batch_size=64, shuffle=False, 
-                             num_workers=4, pin_memory=True, persistent_workers=True)
-    
-    # Create model
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    
-    encoder = Encoder(len(urdu_token_to_id), emb_dim=128, hid_dim=64, n_layers=2)
-    decoder = Decoder(len(roman_token_to_id), emb_dim=128, hid_dim=64, n_layers=2)
+def load_tokenizers_and_model(
+    urdu_tokenizer_path='unigram_urdu_tokenizer.pkl',
+    roman_tokenizer_path='unigram_roman_tokenizer.pkl',
+    model_path='unigram_urdu_roman_seq2seq_model.pth',
+    emb_dim=128, hid_dim=64, n_layers=2, device=None
+):
+    """Load tokenizers and trained model for inference."""
+    if device is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # Load tokenizers
+    urdu_tokenizer = UnigramTokenizer()
+    urdu_tokenizer.load(urdu_tokenizer_path)
+    roman_tokenizer = UnigramTokenizer()
+    roman_tokenizer.load(roman_tokenizer_path)
+    # Build model
+    encoder = Encoder(len(urdu_tokenizer.token_to_id), emb_dim=emb_dim, hid_dim=hid_dim, n_layers=n_layers)
+    decoder = Decoder(len(roman_tokenizer.token_to_id), emb_dim=emb_dim, hid_dim=hid_dim, n_layers=n_layers)
     model = Seq2SeqModel(encoder, decoder, device)
-    
-    print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
-    
-    # Train model
-    train_losses, val_losses = train_model(model, train_loader, val_loader, num_epochs=5, learning_rate=0.001)
-    
-    # Plot training curves
-    plt.figure(figsize=(10, 6))
-    plt.plot(train_losses, label='Train Loss')
-    plt.plot(val_losses, label='Validation Loss')
-    plt.xlabel('Epoch')
-    plt.ylabel('Loss')
-    plt.title('Unigram Tokenizer Training and Validation Loss')
-    plt.legend()
-    plt.grid(True)
-    plt.savefig('unigram_training_curves.png')
-    plt.show()
-    
-    # Test translation
-    print("\nTesting translation on sample sentences:")
-    print("=" * 50)
-    
-    for i in range(5):
-        urdu_text, expected_roman = test_pairs[i]
-        translated = translate(model, urdu_text, urdu_tokenizer, roman_tokenizer)
-        
-        print(f"\nExample {i+1}:")
-        print(f"Urdu: {urdu_text}")
-        print(f"Expected Roman: {expected_roman}")
-        print(f"Translated: {translated}")
-    
-    # Evaluate model with BLEU and Perplexity
-    print("\n" + "=" * 80)
-    evaluation_results = evaluate_model(model, test_loader, test_pairs, urdu_tokenizer, roman_tokenizer, device, num_samples=100)
+    model.load_state_dict(torch.load(model_path, map_location=device))
+    model.eval()
+    return model, urdu_tokenizer, roman_tokenizer, device
 
-    print(f"\nEvaluation Results:")
-    print(f"=" * 50)
-    print(f"Perplexity: {evaluation_results['ppl']:.2f}")
-    print(f"BLEU-1: {evaluation_results['bleu_1']:.4f}")
-    print(f"BLEU-2: {evaluation_results['bleu_2']:.4f}")
-    print(f"BLEU-3: {evaluation_results['bleu_3']:.4f}")
-    print(f"BLEU-4: {evaluation_results['bleu_4']:.4f}")
-    print(f"Average BLEU: {evaluation_results['avg_bleu']:.4f}")
-    
-    # Save model
-    torch.save(model.state_dict(), 'unigram_urdu_roman_seq2seq_model.pth')
-
-    print("\nModel and tokenizers saved!")
-    print("Training completed successfully!")
-
-    best_model, best_experiment, best_val_loss = run_experiments(train_loader, val_loader, urdu_token_to_id, roman_token_to_id, device)
-    test_model = best_model  # The best model from the experiments
-    test_loss = 0
-    test_batches = 0
-    
-    # Test model
-    test_model.eval()
-    with torch.no_grad():
-        for src, tgt in test_loader:
-            src, tgt = src.to(device), tgt.to(device)
-            outputs, _ = test_model(src, tgt, teacher_forcing_ratio=0.0)
-            loss = nn.CrossEntropyLoss(ignore_index=0)(outputs.reshape(-1, outputs.size(-1)), tgt[:, 1:].reshape(-1))
-            test_loss += loss.item()
-            test_batches += 1
-            
-    avg_test_loss = test_loss / test_batches
-    print(f"Test Loss: {avg_test_loss:.4f}")
-    torch.save(best_model.state_dict(), 'best_urdu_roman_seq2seq_model.pth')
-
-if __name__ == "__main__":
-    main()
+def streamlit_translate_urdu_to_roman(
+    urdu_text,
+    model,
+    urdu_tokenizer,
+    roman_tokenizer,
+    device,
+    max_length=50
+):
+    """Translate Urdu text to Roman Urdu for Streamlit app."""
+    # Limit input length for safety
+    urdu_text = urdu_text[:400]
+    # Use the same translate logic as before
+    return translate(model, urdu_text, urdu_tokenizer, roman_tokenizer, max_length=max_length)
