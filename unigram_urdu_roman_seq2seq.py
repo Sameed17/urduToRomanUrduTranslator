@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
-"""
-Unigram Tokenizer-based Seq2Seq Model for Urdu to Roman Urdu Translation
-Using Unigram tokenization (better than BPE for many languages)
-"""
 
+import os
+import shutil
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -15,6 +13,12 @@ import pickle
 import random
 from sklearn.model_selection import train_test_split
 import math
+import time
+
+"""
+Unigram Tokenizer-based Seq2Seq Model for Urdu to Roman Urdu Translation
+Using Unigram tokenization (better than BPE for many languages)
+"""
 
 # Set random seeds for reproducibility
 torch.manual_seed(42)
@@ -416,8 +420,8 @@ class Seq2SeqModel(nn.Module):
     
     def __init__(self, encoder, decoder, device):
         super().__init__()
-        self.encoder = encoder
-        self.decoder = decoder
+        self.encoder = encoder.to(device)
+        self.decoder = decoder.to(device)
         self.device = device
         
     def forward(self, src, tgt, teacher_forcing_ratio=0.5):
@@ -488,6 +492,18 @@ def train_model(model, train_loader, val_loader, num_epochs=10, learning_rate=0.
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = model.to(device)
     
+    # Print GPU information
+    if torch.cuda.is_available():
+        print(f"CUDA available: {torch.cuda.is_available()}")
+        print(f"CUDA device count: {torch.cuda.device_count()}")
+        print(f"Current CUDA device: {torch.cuda.current_device()}")
+        print(f"CUDA device name: {torch.cuda.get_device_name()}")
+        print(f"CUDA memory allocated: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
+        print(f"CUDA memory cached: {torch.cuda.memory_reserved() / 1024**3:.2f} GB")
+        
+        # Clear GPU cache
+        torch.cuda.empty_cache()
+    
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
     criterion = nn.CrossEntropyLoss(ignore_index=0)  # Ignore padding tokens
     
@@ -501,9 +517,11 @@ def train_model(model, train_loader, val_loader, num_epochs=10, learning_rate=0.
         model.train()
         train_loss = 0
         train_batches = 0
+        epoch_start_time = time.time()
         
         for batch_idx, (src, tgt) in enumerate(train_loader):
-            src, tgt = src.to(device), tgt.to(device)
+            batch_start_time = time.time()
+            src, tgt = src.to(device, non_blocking=True), tgt.to(device, non_blocking=True)
             
             optimizer.zero_grad()
             
@@ -522,7 +540,12 @@ def train_model(model, train_loader, val_loader, num_epochs=10, learning_rate=0.
             train_batches += 1
             
             if batch_idx % 100 == 0:
-                print(f'Epoch {epoch+1}/{num_epochs}, Batch {batch_idx}, Loss: {loss.item():.4f}')
+                batch_time = time.time() - batch_start_time
+                if torch.cuda.is_available():
+                    gpu_mem = torch.cuda.memory_allocated() / 1024**3
+                    print(f'Epoch {epoch+1}/{num_epochs}, Batch {batch_idx}, Loss: {loss.item():.4f}, GPU Mem: {gpu_mem:.2f}GB, Time: {batch_time:.3f}s')
+                else:
+                    print(f'Epoch {epoch+1}/{num_epochs}, Batch {batch_idx}, Loss: {loss.item():.4f}, Time: {batch_time:.3f}s')
         
         # Validation
         model.eval()
@@ -531,7 +554,7 @@ def train_model(model, train_loader, val_loader, num_epochs=10, learning_rate=0.
         
         with torch.no_grad():
             for src, tgt in val_loader:
-                src, tgt = src.to(device), tgt.to(device)
+                src, tgt = src.to(device, non_blocking=True), tgt.to(device, non_blocking=True)
                 outputs, _ = model(src, tgt, teacher_forcing_ratio=0.0)
                 loss = criterion(outputs.reshape(-1, outputs.size(-1)), tgt[:, 1:].reshape(-1))
                 val_loss += loss.item()
@@ -543,9 +566,14 @@ def train_model(model, train_loader, val_loader, num_epochs=10, learning_rate=0.
         train_losses.append(avg_train_loss)
         val_losses.append(avg_val_loss)
         
+        epoch_time = time.time() - epoch_start_time
         print(f'Epoch {epoch+1}/{num_epochs}:')
         print(f'  Train Loss: {avg_train_loss:.4f}')
         print(f'  Val Loss: {avg_val_loss:.4f}')
+        print(f'  Epoch Time: {epoch_time:.2f}s')
+        if torch.cuda.is_available():
+            gpu_mem = torch.cuda.memory_allocated() / 1024**3
+            print(f'  GPU Memory: {gpu_mem:.2f}GB')
         print('-' * 50)
     
     return train_losses, val_losses
@@ -669,7 +697,7 @@ def calculate_perplexity(model, data_loader, criterion, device):
     
     with torch.no_grad():
         for src, tgt in data_loader:
-            src, tgt = src.to(device), tgt.to(device)
+            src, tgt = src.to(device, non_blocking=True), tgt.to(device, non_blocking=True)
             
             # Forward pass without teacher forcing
             outputs, _ = model(src, tgt, teacher_forcing_ratio=0.0)
@@ -727,40 +755,108 @@ def evaluate_model(model, test_loader, test_pairs, urdu_tokenizer, roman_tokeniz
     
     # Calculate average BLEU scores
     avg_bleu = np.mean(bleu_scores)
-    bleu_1 = np.mean([calculate_bleu_score(test_pairs[i][1], translate(model, test_pairs[i][0], urdu_tokenizer, roman_tokenizer), max_n=1) 
-                     for i in range(samples_to_eval)])
-    bleu_2 = np.mean([calculate_bleu_score(test_pairs[i][1], translate(model, test_pairs[i][0], urdu_tokenizer, roman_tokenizer), max_n=2) 
-                     for i in range(samples_to_eval)])
-    bleu_3 = np.mean([calculate_bleu_score(test_pairs[i][1], translate(model, test_pairs[i][0], urdu_tokenizer, roman_tokenizer), max_n=3) 
-                     for i in range(samples_to_eval)])
-    bleu_4 = np.mean([calculate_bleu_score(test_pairs[i][1], translate(model, test_pairs[i][0], urdu_tokenizer, roman_tokenizer), max_n=4) 
-                     for i in range(samples_to_eval)])
+    bleu_1 = np.mean([calculate_bleu_score(test_pairs[i][1], translate(model, test_pairs[i][0], urdu_tokenizer, roman_tokenizer), max_n=1) for i in range(samples_to_eval)])
+    bleu_2 = np.mean([calculate_bleu_score(test_pairs[i][1], translate(model, test_pairs[i][0], urdu_tokenizer, roman_tokenizer), max_n=2) for i in range(samples_to_eval)])
+    bleu_3 = np.mean([calculate_bleu_score(test_pairs[i][1], translate(model, test_pairs[i][0], urdu_tokenizer, roman_tokenizer), max_n=3) for i in range(samples_to_eval)])
+    bleu_4 = np.mean([calculate_bleu_score(test_pairs[i][1], translate(model, test_pairs[i][0], urdu_tokenizer, roman_tokenizer), max_n=4) for i in range(samples_to_eval)])
     
-    print(f"\nEvaluation Results:")
-    print(f"=" * 50)
-    print(f"Perplexity: {ppl:.2f}")
-    print(f"BLEU-1: {bleu_1:.4f}")
-    print(f"BLEU-2: {bleu_2:.4f}")
-    print(f"BLEU-3: {bleu_3:.4f}")
-    print(f"BLEU-4: {bleu_4:.4f}")
-    print(f"Average BLEU: {avg_bleu:.4f}")
+    
     
     return {
-        'perplexity': ppl,
+        'ppl': ppl,
         'bleu_1': bleu_1,
         'bleu_2': bleu_2,
         'bleu_3': bleu_3,
         'bleu_4': bleu_4,
-        'bleu_avg': avg_bleu
+        'avg_bleu': avg_bleu
     }
+
+def run_experiments(train_loader, val_loader, urdu_token_to_id, roman_token_to_id, device):
+    """Run the experiments and return the best model."""
+    best_val_loss = float('inf')
+    best_model = None
+    best_experiment = None
+    
+    experiments = [
+        ("Experiment 1", {
+            "emb_src": 256, "emb_tgt": 256, "enc_hidden": 512, "dec_hidden": 512,
+            "enc_layers": 2, "dec_layers": 2, "dropout": 0.3, "batch_size": 64, "lr": 1e-3, "epochs": 5
+        }),
+        ("Experiment 2", {
+            "emb_src": 128, "emb_tgt": 128, "enc_hidden": 256, "dec_hidden": 256,
+            "enc_layers": 4, "dec_layers": 4, "dropout": 0.3, "batch_size": 64, "lr": 5e-4, "epochs": 5
+        }),
+        ("Experiment 3", {
+            "emb_src": 512, "emb_tgt": 512, "enc_hidden": 512, "dec_hidden": 512,
+            "enc_layers": 4, "dec_layers": 4, "dropout": 0.5, "batch_size": 32, "lr": 1e-4, "epochs": 5
+        }),
+        ("Experiment 4", {
+            "emb_src": 256, "emb_tgt": 256, "enc_hidden": 512, "dec_hidden": 512,
+            "enc_layers": 4, "dec_layers": 4, "dropout": 0.1, "batch_size": 32, "lr": 1e-3, "epochs": 5
+        }),
+        ("Experiment 5", {
+            "emb_src": 128, "emb_tgt": 128, "enc_hidden": 256, "dec_hidden": 256,
+            "enc_layers": 2, "dec_layers": 2, "dropout": 0.5, "batch_size": 128, "lr": 5e-4, "epochs": 5
+        }),
+    ]
+    
+    # Loop through experiments
+    for experiment_name, params in experiments:
+        print(f"\nStarting {experiment_name}")
+        print("=" * 50)
+        
+        # Initialize the model with experiment parameters
+        encoder = Encoder(len(urdu_token_to_id), emb_dim=params["emb_src"], hid_dim=params["enc_hidden"], n_layers=params["enc_layers"], dropout=params["dropout"])
+        decoder = Decoder(len(roman_token_to_id), emb_dim=params["emb_tgt"], hid_dim=params["dec_hidden"], n_layers=params["dec_layers"], dropout=params["dropout"])
+        model = Seq2SeqModel(encoder, decoder, device)
+        
+        # Move model to device
+        model = model.to(device)
+        
+        # Train model for current experiment
+        print(f"Training {experiment_name}...")
+        train_losses, val_losses = train_model(model, train_loader, val_loader, num_epochs=params["epochs"], learning_rate=params["lr"])
+        
+        # Evaluate model on validation set to determine if it's the best
+        avg_val_loss = min(val_losses)  # Take the best (lowest) validation loss
+        
+        if avg_val_loss < best_val_loss:
+            best_val_loss = avg_val_loss
+            best_model = model
+            best_experiment = experiment_name, params
+            
+            # Save the best model
+            torch.save(best_model.state_dict(), f'best_model_{experiment_name}.pth')
+            print(f"New best model found and saved from {experiment_name} with validation loss: {best_val_loss:.4f}")
+    
+    # After all experiments, return the best model
+    return best_model, best_experiment, best_val_loss
+def check_gpu_utilization():
+    """Check and display GPU utilization information"""
+    if torch.cuda.is_available():
+        print("GPU Information:")
+        print(f"  CUDA Available: {torch.cuda.is_available()}")
+        print(f"  Device Count: {torch.cuda.device_count()}")
+        print(f"  Current Device: {torch.cuda.current_device()}")
+        print(f"  Device Name: {torch.cuda.get_device_name()}")
+        print(f"  Memory Allocated: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
+        print(f"  Memory Cached: {torch.cuda.memory_reserved() / 1024**3:.2f} GB")
+        print(f"  Max Memory: {torch.cuda.max_memory_allocated() / 1024**3:.2f} GB")
+        print("=" * 50)
+    else:
+        print("CUDA not available - running on CPU")
+        print("=" * 50)
 
 def main():
     """Main training function"""
     print("Starting Urdu to Roman Urdu Translation Training with Unigram Tokenizer")
     print("=" * 80)
     
+    # Check GPU utilization
+    check_gpu_utilization()
+    
     # Load and preprocess data
-    pairs = load_data('./normalized_dataset/filtered_urdu_roman_urdu_pairs.txt')
+    pairs = load_data('/kaggle/working/dataset/filtered_urdu_roman_urdu_pairs.txt')
     pairs = preprocess_data(pairs, max_pairs=8000)  # Use more data for unigram training
     
     # Split data
@@ -810,10 +906,13 @@ def main():
     val_dataset = UnigramUrduRomanDataset(val_pairs, urdu_tokenizer, roman_tokenizer)
     test_dataset = UnigramUrduRomanDataset(test_pairs, urdu_tokenizer, roman_tokenizer)
     
-    # Create data loaders
-    train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=32, shuffle=False)
-    test_loader = DataLoader(test_dataset, batch_size=32, shuffle=False)
+    # Create data loaders with optimized settings for GPU
+    train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True, 
+                             num_workers=4, pin_memory=True, persistent_workers=True)
+    val_loader = DataLoader(val_dataset, batch_size=64, shuffle=False, 
+                           num_workers=4, pin_memory=True, persistent_workers=True)
+    test_loader = DataLoader(test_dataset, batch_size=64, shuffle=False, 
+                             num_workers=4, pin_memory=True, persistent_workers=True)
     
     # Create model
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -825,8 +924,7 @@ def main():
     print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
     
     # Train model
-    train_losses, val_losses = train_model(model, train_loader, val_loader, 
-                                          num_epochs=15, learning_rate=0.001)
+    train_losses, val_losses = train_model(model, train_loader, val_loader, num_epochs=5, learning_rate=0.001)
     
     # Plot training curves
     plt.figure(figsize=(10, 6))
@@ -855,15 +953,41 @@ def main():
     
     # Evaluate model with BLEU and Perplexity
     print("\n" + "=" * 80)
-    evaluation_results = evaluate_model(model, test_loader, test_pairs, 
-                                      urdu_tokenizer, roman_tokenizer, device, 
-                                      num_samples=100)
+    evaluation_results = evaluate_model(model, test_loader, test_pairs, urdu_tokenizer, roman_tokenizer, device, num_samples=100)
+
+    print(f"\nEvaluation Results:")
+    print(f"=" * 50)
+    print(f"Perplexity: {evaluation_results['ppl']:.2f}")
+    print(f"BLEU-1: {evaluation_results['bleu_1']:.4f}")
+    print(f"BLEU-2: {evaluation_results['bleu_2']:.4f}")
+    print(f"BLEU-3: {evaluation_results['bleu_3']:.4f}")
+    print(f"BLEU-4: {evaluation_results['bleu_4']:.4f}")
+    print(f"Average BLEU: {evaluation_results['avg_bleu']:.4f}")
     
     # Save model
     torch.save(model.state_dict(), 'unigram_urdu_roman_seq2seq_model.pth')
-    
+
     print("\nModel and tokenizers saved!")
     print("Training completed successfully!")
+
+    best_model, best_experiment, best_val_loss = run_experiments(train_loader, val_loader, urdu_token_to_id, roman_token_to_id, device)
+    test_model = best_model  # The best model from the experiments
+    test_loss = 0
+    test_batches = 0
+    
+    # Test model
+    test_model.eval()
+    with torch.no_grad():
+        for src, tgt in test_loader:
+            src, tgt = src.to(device), tgt.to(device)
+            outputs, _ = test_model(src, tgt, teacher_forcing_ratio=0.0)
+            loss = nn.CrossEntropyLoss(ignore_index=0)(outputs.reshape(-1, outputs.size(-1)), tgt[:, 1:].reshape(-1))
+            test_loss += loss.item()
+            test_batches += 1
+            
+    avg_test_loss = test_loss / test_batches
+    print(f"Test Loss: {avg_test_loss:.4f}")
+    torch.save(best_model.state_dict(), 'best_urdu_roman_seq2seq_model.pth')
 
 if __name__ == "__main__":
     main()
