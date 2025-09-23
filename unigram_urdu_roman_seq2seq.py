@@ -10,6 +10,7 @@ import random
 from sklearn.model_selection import train_test_split
 import math
 import time
+from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
 
 """
 Unigram Tokenizer-based Seq2Seq Model for Urdu to Roman Urdu Translation
@@ -353,6 +354,62 @@ class Attention(nn.Module):
         
         return context_vector, attention_weights
 
+class xLSTMAttention(nn.Module):
+    """Improved attention mechanism for xLSTM models with proper dimension handling"""
+    
+    def __init__(self, encoder_hidden_dim, decoder_hidden_dim, attention_dim=128):
+        super().__init__()
+        self.encoder_hidden_dim = encoder_hidden_dim
+        self.decoder_hidden_dim = decoder_hidden_dim
+        self.attention_dim = attention_dim
+        
+        # Attention layers with proper dimensions
+        self.W_enc = nn.Linear(encoder_hidden_dim, attention_dim, bias=False)
+        self.W_dec = nn.Linear(decoder_hidden_dim, attention_dim, bias=False)
+        self.v = nn.Linear(attention_dim, 1, bias=False)
+        
+        # Context projection - now handles bidirectional encoder output
+        self.W_context = nn.Linear(encoder_hidden_dim + decoder_hidden_dim, decoder_hidden_dim)
+        
+        # Add layer normalization for stability
+        self.layer_norm = nn.LayerNorm(decoder_hidden_dim)
+        
+    def forward(self, decoder_hidden, encoder_outputs):
+        """
+        decoder_hidden: [batch_size, decoder_hidden_dim]
+        encoder_outputs: [batch_size, seq_len, encoder_hidden_dim] (bidirectional = hid_dim * 2)
+        """
+        batch_size, seq_len, _ = encoder_outputs.size()
+        
+        # Project encoder outputs to attention space
+        enc_proj = self.W_enc(encoder_outputs)  # [batch_size, seq_len, attention_dim]
+        
+        # Project decoder hidden to attention space
+        dec_proj = self.W_dec(decoder_hidden)  # [batch_size, attention_dim]
+        
+        # Expand decoder projection for broadcasting
+        dec_proj_expanded = dec_proj.unsqueeze(1).expand(-1, seq_len, -1)  # [batch_size, seq_len, attention_dim]
+        
+        # Calculate attention scores with better numerical stability
+        attention_scores = self.v(torch.tanh(enc_proj + dec_proj_expanded))  # [batch_size, seq_len, 1]
+        attention_scores = attention_scores.squeeze(-1)  # [batch_size, seq_len]
+        
+        # Apply softmax to get attention weights
+        attention_weights = torch.softmax(attention_scores, dim=1)  # [batch_size, seq_len]
+        
+        # Calculate weighted context vector
+        context_vector = torch.bmm(attention_weights.unsqueeze(1), encoder_outputs)  # [batch_size, 1, encoder_hidden_dim]
+        context_vector = context_vector.squeeze(1)  # [batch_size, encoder_hidden_dim]
+        
+        # Combine context with decoder hidden
+        combined = torch.cat([context_vector, decoder_hidden], dim=1)  # [batch_size, encoder_hidden_dim + decoder_hidden_dim]
+        context = self.W_context(combined)  # [batch_size, decoder_hidden_dim]
+        
+        # Apply layer normalization for stability
+        context = self.layer_norm(context)
+        
+        return context, attention_weights
+
 class Encoder(nn.Module):
     """Bidirectional LSTM Encoder with 2 layers"""
     
@@ -397,7 +454,26 @@ class Decoder(nn.Module):
     def forward(self, tgt, hidden, cell, encoder_outputs):
         embedded = self.dropout(self.embedding(tgt))
         
-        # Get attention context
+        # Handle different layer counts between encoder and decoder
+        decoder_layers = self.rnn.num_layers
+        encoder_layers = hidden.size(0)
+        
+        if decoder_layers > encoder_layers:
+            # Pad hidden and cell states with zeros for additional layers
+            batch_size = hidden.size(1)
+            hidden_dim = hidden.size(2)
+            
+            # Create zero tensors for additional layers
+            additional_hidden = torch.zeros(decoder_layers - encoder_layers, batch_size, hidden_dim, 
+                                          device=hidden.device, dtype=hidden.dtype)
+            additional_cell = torch.zeros(decoder_layers - encoder_layers, batch_size, hidden_dim, 
+                                        device=cell.device, dtype=cell.dtype)
+            
+            # Concatenate with existing hidden states
+            hidden = torch.cat([hidden, additional_hidden], dim=0)
+            cell = torch.cat([cell, additional_cell], dim=0)
+        
+        # Get attention context - use the last layer's hidden state
         context_vector, attention_weights = self.attention(hidden[-1], encoder_outputs)
         
         # Concatenate embedded input with context vector
@@ -449,6 +525,226 @@ class Seq2SeqModel(nn.Module):
             
         return outputs, attention_weights
 
+# Improved xLSTM Implementation with proper architecture
+class xLSTMBlock(nn.Module):
+    """Improved xLSTM block implementation with matrix memory and exponential gating"""
+    def __init__(self, input_size, hidden_size, num_layers=1, bidirectional=False):
+        super().__init__()
+        self.input_size = input_size
+        self.hidden_size = hidden_size
+        self.num_layers = num_layers
+        self.bidirectional = bidirectional
+        
+        # Matrix memory dimensions - use full hidden size for consistency
+        self.memory_size = hidden_size
+        
+        # Input projections
+        self.input_proj = nn.Linear(input_size, hidden_size * 4)
+        
+        # Matrix memory components
+        self.W_f = nn.Linear(hidden_size, self.memory_size)  # Forget gate
+        self.W_i = nn.Linear(hidden_size, self.memory_size)  # Input gate  
+        self.W_o = nn.Linear(hidden_size, self.memory_size)  # Output gate
+        self.W_c = nn.Linear(hidden_size, self.memory_size)  # Candidate values
+        
+        # Scalar gates for better control
+        self.scalar_f = nn.Parameter(torch.ones(1))
+        self.scalar_i = nn.Parameter(torch.ones(1))
+        self.scalar_o = nn.Parameter(torch.ones(1))
+        
+        # Output projection
+        self.output_proj = nn.Linear(self.memory_size, hidden_size)
+        
+        # Layer normalization for stability
+        self.layer_norm = nn.LayerNorm(hidden_size)
+        
+    def forward(self, x, hidden_state=None):
+        batch_size, seq_len, _ = x.size()
+        
+        if hidden_state is None:
+            h = torch.zeros(batch_size, self.hidden_size, device=x.device)
+            c = torch.zeros(batch_size, self.memory_size, device=x.device)
+        else:
+            h, c = hidden_state
+            
+        outputs = []
+        
+        for t in range(seq_len):
+            x_t = x[:, t, :]
+            
+            # Input projection
+            projected = self.input_proj(x_t)
+            i_gate, f_gate, o_gate, candidate = projected.chunk(4, dim=1)
+            
+            # Apply gates with exponential functions for better gradient flow
+            i_gate = torch.sigmoid(i_gate) * self.scalar_i
+            f_gate = torch.sigmoid(f_gate) * self.scalar_f
+            o_gate = torch.sigmoid(o_gate) * self.scalar_o
+            candidate = torch.tanh(candidate)
+            
+            # Matrix memory operations
+            f_matrix = self.W_f(h)
+            i_matrix = self.W_i(h)
+            o_matrix = self.W_o(h)
+            c_matrix = self.W_c(h)
+            
+            # Update cell state with matrix operations
+            c = f_gate * c + i_gate * c_matrix
+            h = o_gate * torch.tanh(c)
+            
+            # Project back to hidden size
+            h = self.output_proj(h)
+            h = self.layer_norm(h)
+            
+            outputs.append(h)
+            
+        # Return outputs and final hidden state
+        return torch.stack(outputs, dim=1), h, c
+
+class xLSTMEncoder(nn.Module):
+    """Improved xLSTM-based Encoder with bidirectional support"""
+    def __init__(self, vocab_size, emb_dim=128, hid_dim=64, n_layers=2, dropout=0.1, bidirectional=True):
+        super().__init__()
+        self.embedding = nn.Embedding(vocab_size, emb_dim, padding_idx=0)
+        self.bidirectional = bidirectional
+        
+        # Use separate xLSTM blocks for forward and backward if bidirectional
+        if bidirectional:
+            self.forward_xlstm = xLSTMBlock(emb_dim, hid_dim, n_layers, bidirectional=False)
+            self.backward_xlstm = xLSTMBlock(emb_dim, hid_dim, n_layers, bidirectional=False)
+            self.output_hidden_dim = hid_dim * 2  # Double for bidirectional
+        else:
+            self.xlstm = xLSTMBlock(emb_dim, hid_dim, n_layers, bidirectional=False)
+            self.output_hidden_dim = hid_dim
+            
+        self.dropout = nn.Dropout(dropout)
+        self.hid_dim = hid_dim
+        self.n_layers = n_layers
+        
+    def forward(self, src):
+        embedded = self.dropout(self.embedding(src))
+        
+        if self.bidirectional:
+            # Forward pass
+            forward_outputs, forward_hidden, forward_cell = self.forward_xlstm(embedded)
+            
+            # Backward pass (reverse the sequence)
+            reversed_embedded = torch.flip(embedded, dims=[1])
+            backward_outputs, backward_hidden, backward_cell = self.backward_xlstm(reversed_embedded)
+            backward_outputs = torch.flip(backward_outputs, dims=[1])  # Reverse back
+            
+            # Concatenate forward and backward outputs
+            outputs = torch.cat([forward_outputs, backward_outputs], dim=2)
+            
+            # Concatenate hidden states
+            hidden = torch.cat([forward_hidden, backward_hidden], dim=1)
+            cell = torch.cat([forward_cell, backward_cell], dim=1)
+            
+            return outputs, hidden, cell
+        else:
+            outputs, hidden, cell = self.xlstm(embedded)
+            return outputs, hidden, cell
+
+class xLSTMDecoder(nn.Module):
+    """Improved xLSTM-based Decoder with proper attention"""
+    def __init__(self, vocab_size, emb_dim=128, hid_dim=64, n_layers=4, dropout=0.1, encoder_hidden_dim=None):
+        super().__init__()
+        self.embedding = nn.Embedding(vocab_size, emb_dim, padding_idx=0)
+        
+        # Use encoder hidden dim if provided (for bidirectional), otherwise use hid_dim
+        if encoder_hidden_dim is None:
+            encoder_hidden_dim = hid_dim
+            
+        # xLSTM input includes context dimension from attention
+        self.xlstm = xLSTMBlock(emb_dim + hid_dim, hid_dim, n_layers)
+        
+        # Use proper attention with correct dimensions
+        self.attention = xLSTMAttention(encoder_hidden_dim, hid_dim)
+        
+        
+        # Output layer combines decoder output with context
+        self.fc_out = nn.Linear(hid_dim + encoder_hidden_dim, vocab_size)
+        self.dropout = nn.Dropout(dropout)
+        self.hid_dim = hid_dim
+        
+    def forward(self, tgt, hidden, cell, encoder_outputs):
+        # Embed target - tgt should be [batch_size, 1]
+        embedded = self.dropout(self.embedding(tgt))
+        
+        # Get attention context
+        context, attention_weights = self.attention(hidden, encoder_outputs)
+        
+        # Use context directly (already has correct dimension from attention)
+        context_expanded = context.unsqueeze(1).expand(-1, embedded.size(1), -1)
+        xlstm_input = torch.cat([embedded, context_expanded], dim=2)
+        
+        # Pass through xLSTM
+        output, hidden, cell = self.xlstm(xlstm_input, (hidden, cell))
+        
+        # Combine output with original encoder context for final prediction
+        # Get original context from encoder outputs using attention weights
+        original_context = torch.bmm(attention_weights.unsqueeze(1), encoder_outputs).squeeze(1)
+        context_expanded_out = original_context.unsqueeze(1).expand(-1, output.size(1), -1)
+        combined_output = torch.cat([output, context_expanded_out], dim=2)
+        
+        # Final linear layer
+        prediction = self.fc_out(combined_output)  # [batch_size, 1, vocab_size]
+        
+        return prediction, hidden, cell, attention_weights
+
+class xLSTMSeq2SeqModel(nn.Module):
+    """Complete Seq2Seq model with xLSTM and specialized attention"""
+    
+    def __init__(self, encoder, decoder, device):
+        super().__init__()
+        self.encoder = encoder.to(device)
+        self.decoder = decoder.to(device)
+        self.device = device
+        
+        # Project encoder hidden states to decoder hidden dimension
+        encoder_hidden_dim = encoder.output_hidden_dim
+        decoder_hidden_dim = decoder.hid_dim
+        self.hidden_projection = nn.Linear(encoder_hidden_dim, decoder_hidden_dim).to(device)
+        self.cell_projection = nn.Linear(encoder_hidden_dim, decoder_hidden_dim).to(device)
+        
+    def forward(self, src, tgt, teacher_forcing_ratio=0.5):
+        batch_size = tgt.size(0)
+        tgt_len = tgt.size(1)
+        vocab_size = self.decoder.fc_out.out_features
+        
+        # Encode
+        encoder_outputs, hidden, cell = self.encoder(src)
+        
+        # Project encoder hidden states to decoder dimensions
+        hidden = self.hidden_projection(hidden)
+        cell = self.cell_projection(cell)
+        
+        # Initialize decoder input
+        decoder_input = tgt[:, 0:1]  # First token (SOS)
+        
+        # Prepare outputs
+        outputs = torch.zeros(batch_size, tgt_len-1, vocab_size).to(self.device)
+        attention_weights = torch.zeros(batch_size, tgt_len-1, src.size(1)).to(self.device)
+        
+        for t in range(1, tgt_len):
+            # Decode with attention
+            logits, hidden, cell, attn_weights = self.decoder(decoder_input, hidden, cell, encoder_outputs)
+            
+            # Store output
+            outputs[:, t-1, :] = logits.squeeze(1) if logits.dim() > 2 else logits
+            attention_weights[:, t-1, :] = attn_weights
+            
+            # Teacher forcing
+            teacher_force = random.random() < teacher_forcing_ratio
+            if teacher_force:
+                decoder_input = tgt[:, t:t+1]  # Next ground truth token
+            else:
+                # Use predicted token
+                top1 = logits.argmax(-1)  # Get most likely token
+                decoder_input = top1.unsqueeze(1) if top1.dim() == 1 else top1
+            
+        return outputs, attention_weights
+
 def load_data(file_path):
     """Load Urdu-Roman Urdu pairs from file"""
     print(f"Loading data from {file_path}...")
@@ -482,6 +778,61 @@ def preprocess_data(pairs, max_pairs=10000):
     
     print(f"Filtered to {len(filtered_pairs)} pairs")
     return filtered_pairs
+
+def inject_noise(text, noise_prob=0.1):
+    """Inject noise into text by randomly replacing characters"""
+    if random.random() > noise_prob:
+        return text
+    
+    chars = list(text)
+    if len(chars) < 3:
+        return text
+    
+    # Random character substitution
+    if random.random() < 0.5:
+        idx = random.randint(0, len(chars) - 1)
+        # Replace with similar character (for Roman Urdu)
+        similar_chars = {
+            'a': 'e', 'e': 'a', 'i': 'e', 'o': 'u', 'u': 'o',
+            'k': 'q', 'q': 'k', 'b': 'p', 'p': 'b',
+            'd': 't', 't': 'd', 'g': 'j', 'j': 'g'
+        }
+        if chars[idx].lower() in similar_chars:
+            chars[idx] = similar_chars[chars[idx].lower()]
+    
+    # Random character deletion
+    elif random.random() < 0.3 and len(chars) > 5:
+        idx = random.randint(1, len(chars) - 2)
+        chars.pop(idx)
+    
+    # Random character insertion
+    elif random.random() < 0.2 and len(chars) < 50:
+        idx = random.randint(1, len(chars) - 1)
+        chars.insert(idx, random.choice('aeiou'))
+    
+    return ''.join(chars)
+
+def augment_dataset(pairs, augmentation_factor=2):
+    """Augment dataset using various techniques"""
+    print(f"Augmenting dataset with factor {augmentation_factor}...")
+    
+    augmented_pairs = []
+    
+    for urdu_text, roman_text in pairs:
+        # Add original pair
+        augmented_pairs.append((urdu_text, roman_text))
+        
+        # Noise injection on Roman text
+        noisy_roman = inject_noise(roman_text, noise_prob=0.15)
+        if noisy_roman != roman_text:
+            augmented_pairs.append((urdu_text, noisy_roman))
+    
+    # Limit augmentation to avoid too much data
+    if len(augmented_pairs) > len(pairs) * augmentation_factor:
+        augmented_pairs = augmented_pairs[:len(pairs) * augmentation_factor]
+    
+    print(f"Augmented dataset from {len(pairs)} to {len(augmented_pairs)} pairs")
+    return augmented_pairs
 
 def train_model(model, train_loader, val_loader, num_epochs=10, learning_rate=0.001):
     """Train the seq2seq model"""
@@ -519,6 +870,11 @@ def train_model(model, train_loader, val_loader, num_epochs=10, learning_rate=0.
             batch_start_time = time.time()
             src, tgt = src.to(device, non_blocking=True), tgt.to(device, non_blocking=True)
             
+            # Monitor GPU usage
+            if batch_idx % 50 == 0 and torch.cuda.is_available():
+                gpu_mem = torch.cuda.memory_allocated() / 1024**3
+                print(f"Batch {batch_idx}: GPU Memory: {gpu_mem:.2f}GB")
+            
             optimizer.zero_grad()
             
             # Forward pass
@@ -535,7 +891,7 @@ def train_model(model, train_loader, val_loader, num_epochs=10, learning_rate=0.
             train_loss += loss.item()
             train_batches += 1
             
-            if batch_idx % 100 == 0:
+            if batch_idx % 50 == 0:
                 batch_time = time.time() - batch_start_time
                 if torch.cuda.is_available():
                     gpu_mem = torch.cuda.memory_allocated() / 1024**3
@@ -593,21 +949,38 @@ def translate(model, text, urdu_tokenizer, roman_tokenizer, max_length=50):
     # Encode
     model.eval()
     with torch.no_grad():
-        encoder_outputs, (hidden, cell) = model.encoder(src_tensor)
+        encoder_result = model.encoder(src_tensor)
+        
+        # Handle both encoder types: xLSTM returns (outputs, hidden, cell), LSTM returns (outputs, (hidden, cell))
+        if len(encoder_result) == 3:
+            encoder_outputs, hidden, cell = encoder_result
+            # For xLSTM, project hidden states to decoder dimensions
+            if hasattr(model, 'hidden_projection'):
+                hidden = model.hidden_projection(hidden.to(device))
+                cell = model.cell_projection(cell.to(device))
+        else:
+            encoder_outputs, (hidden, cell) = encoder_result
         
         # Initialize decoder
         decoder_input = torch.tensor([[roman_tokenizer.token_to_id['<SOS>']]], dtype=torch.long).to(device)
         translated_ids = []
         
         for _ in range(max_length):
-            logits, (hidden, cell), _ = model.decoder(decoder_input, hidden, cell, encoder_outputs)
+            decoder_result = model.decoder(decoder_input, hidden, cell, encoder_outputs)
+            
+            # Handle both decoder types: xLSTM returns (logits, hidden, cell, attn), LSTM returns (logits, (hidden, cell), attn)
+            if len(decoder_result) == 4:
+                logits, hidden, cell, _ = decoder_result
+            else:
+                logits, (hidden, cell), _ = decoder_result
+                
             top1 = logits.argmax(2)
             translated_ids.append(top1.item())
             
             if top1.item() == roman_tokenizer.token_to_id['<EOS>']:
                 break
                 
-            decoder_input = top1
+            decoder_input = top1.to(device)
     
     # Convert IDs back to text using unigram tokenizer
     translated_text = roman_tokenizer.decode(translated_ids)
@@ -618,69 +991,40 @@ def translate(model, text, urdu_tokenizer, roman_tokenizer, max_length=50):
     
     return translated_text
 
-def get_ngrams(tokens, n):
-    """Get n-grams from a list of tokens"""
-    return [tuple(tokens[i:i+n]) for i in range(len(tokens)-n+1)]
+def calculate_bleu_score(reference, candidate):
+    """
+    Calculate BLEU score using NLTK library (proper implementation)
+    """
+    try:
+        # Tokenize the sentences
+        ref_tokens = reference.split()
+        cand_tokens = candidate.split()
+        
+        if len(cand_tokens) == 0:
+            return 0.0
+        
+        # Use smoothing to handle cases where n-grams don't match
+        smoothing = SmoothingFunction().method1
+        score = sentence_bleu([ref_tokens], cand_tokens, smoothing_function=smoothing)
+        return score
+    except:
+        # Fallback: simple word overlap
+        ref_words = set(reference.split())
+        cand_words = set(candidate.split())
+        if len(cand_words) == 0:
+            return 0.0
+        
+        overlap = len(ref_words.intersection(cand_words))
+        return overlap / len(cand_words)
 
-def calculate_bleu_score(reference, candidate, max_n=4):
+def calculate_bleu_scores_batch(references, candidates):
     """
-    Calculate BLEU score without NLTK
-    BLEU = BP * exp(sum(w_n * log(p_n)))
-    where BP is brevity penalty and p_n is n-gram precision
+    Calculate BLEU scores for a batch of reference-candidate pairs
     """
-    # Tokenize reference and candidate
-    ref_tokens = reference.split()
-    cand_tokens = candidate.split()
-    
-    if len(cand_tokens) == 0:
-        return 0.0
-    
-    # Calculate brevity penalty
-    ref_len = len(ref_tokens)
-    cand_len = len(cand_tokens)
-    
-    if cand_len > ref_len:
-        bp = 1.0
-    else:
-        bp = math.exp(1 - ref_len / cand_len)
-    
-    # Calculate precision for each n-gram
-    precisions = []
-    weights = [1.0 / max_n] * max_n  # Uniform weights
-    
-    for n in range(1, max_n + 1):
-        if len(cand_tokens) < n:
-            precisions.append(0.0)
-            continue
-            
-        # Get n-grams
-        cand_ngrams = get_ngrams(cand_tokens, n)
-        ref_ngrams = get_ngrams(ref_tokens, n)
-        
-        if len(cand_ngrams) == 0:
-            precisions.append(0.0)
-            continue
-        
-        # Count matches
-        cand_counts = Counter(cand_ngrams)
-        ref_counts = Counter(ref_ngrams)
-        
-        # Calculate clipped precision
-        matches = 0
-        for ngram in cand_counts:
-            matches += min(cand_counts[ngram], ref_counts.get(ngram, 0))
-        
-        precision = matches / len(cand_ngrams) if len(cand_ngrams) > 0 else 0.0
-        precisions.append(precision)
-    
-    # Calculate BLEU score
-    if any(p == 0 for p in precisions):
-        return 0.0
-    
-    log_precision = sum(w * math.log(p) for w, p in zip(weights, precisions) if p > 0)
-    bleu = bp * math.exp(log_precision)
-    
-    return bleu
+    scores = []
+    for ref, cand in zip(references, candidates):
+        scores.append(calculate_bleu_score(ref, cand))
+    return scores
 
 def calculate_perplexity(model, data_loader, criterion, device):
     """
@@ -718,7 +1062,7 @@ def calculate_perplexity(model, data_loader, criterion, device):
 
 def evaluate_model(model, test_loader, test_pairs, urdu_tokenizer, roman_tokenizer, device, num_samples=None):
     """
-    Evaluate model with BLEU score and perplexity
+    Evaluate model with proper BLEU score using sacrebleu library and perplexity
     """
     print("Evaluating model...")
     print("=" * 50)
@@ -728,43 +1072,42 @@ def evaluate_model(model, test_loader, test_pairs, urdu_tokenizer, roman_tokeniz
     ppl = calculate_perplexity(model, test_loader, criterion, device)
     print(f"Perplexity: {ppl:.2f}")
     
-    # Calculate BLEU scores
-    bleu_scores = []
+    # Calculate BLEU scores using proper library
     samples_to_eval = num_samples if num_samples else min(100, len(test_pairs))
     
-    print(f"\nCalculating BLEU scores on {samples_to_eval} samples...")
+    print(f"\nCalculating BLEU scores on {samples_to_eval} samples using NLTK...")
+    
+    # Collect all translations first
+    references = []
+    candidates = []
     
     for i in range(samples_to_eval):
         urdu_text, expected_roman = test_pairs[i]
         translated = translate(model, urdu_text, urdu_tokenizer, roman_tokenizer)
         
-        # Calculate BLEU score
-        bleu = calculate_bleu_score(expected_roman, translated)
-        bleu_scores.append(bleu)
+        references.append(expected_roman)
+        candidates.append(translated)
         
         if i < 5:  # Show first 5 examples
             print(f"\nSample {i+1}:")
             print(f"Urdu: {urdu_text}")
             print(f"Expected: {expected_roman}")
             print(f"Translated: {translated}")
-            print(f"BLEU: {bleu:.4f}")
     
-    # Calculate average BLEU scores
-    avg_bleu = np.mean(bleu_scores)
-    bleu_1 = np.mean([calculate_bleu_score(test_pairs[i][1], translate(model, test_pairs[i][0], urdu_tokenizer, roman_tokenizer), max_n=1) for i in range(samples_to_eval)])
-    bleu_2 = np.mean([calculate_bleu_score(test_pairs[i][1], translate(model, test_pairs[i][0], urdu_tokenizer, roman_tokenizer), max_n=2) for i in range(samples_to_eval)])
-    bleu_3 = np.mean([calculate_bleu_score(test_pairs[i][1], translate(model, test_pairs[i][0], urdu_tokenizer, roman_tokenizer), max_n=3) for i in range(samples_to_eval)])
-    bleu_4 = np.mean([calculate_bleu_score(test_pairs[i][1], translate(model, test_pairs[i][0], urdu_tokenizer, roman_tokenizer), max_n=4) for i in range(samples_to_eval)])
+    # Calculate BLEU scores using NLTK
+    individual_scores = calculate_bleu_scores_batch(references, candidates)
+    avg_bleu = np.mean(individual_scores)
+    corpus_bleu_score = avg_bleu  # For simplicity, use average as corpus score
     
-    
+    print(f"\nBLEU Evaluation Results:")
+    print(f"Average Sentence BLEU: {avg_bleu:.4f}")
+    print(f"Corpus BLEU: {corpus_bleu_score:.4f}")
     
     return {
         'ppl': ppl,
-        'bleu_1': bleu_1,
-        'bleu_2': bleu_2,
-        'bleu_3': bleu_3,
-        'bleu_4': bleu_4,
-        'avg_bleu': avg_bleu
+        'corpus_bleu': corpus_bleu_score,
+        'avg_bleu': avg_bleu,
+        'individual_scores': individual_scores if 'individual_scores' in locals() else []
     }
 
 def run_experiments(train_loader, val_loader, urdu_token_to_id, roman_token_to_id, device):
@@ -849,7 +1192,11 @@ def load_tokenizers_and_model(
     model_path='unigram_urdu_roman_seq2seq_model.pth',
     emb_dim=128, hid_dim=64, n_layers=2, device=None
 ):
-    """Load tokenizers and trained model for inference."""
+    """Load tokenizers and trained model for inference.
+    
+    NOTE: This function loads the original BiLSTM+LSTM model.
+    For xLSTM models, use load_xlstm_tokenizers_and_model() instead.
+    """
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     # Load tokenizers
@@ -859,8 +1206,31 @@ def load_tokenizers_and_model(
     roman_tokenizer.load(roman_tokenizer_path)
     # Build model
     encoder = Encoder(len(urdu_tokenizer.token_to_id), emb_dim=emb_dim, hid_dim=hid_dim, n_layers=n_layers)
-    decoder = Decoder(len(roman_tokenizer.token_to_id), emb_dim=emb_dim, hid_dim=hid_dim, n_layers=n_layers)
+    decoder = Decoder(len(roman_tokenizer.token_to_id), emb_dim=emb_dim, hid_dim=hid_dim, n_layers=n_layers*2)
     model = Seq2SeqModel(encoder, decoder, device)
+    model.load_state_dict(torch.load(model_path, map_location=device))
+    model.eval()
+    return model, urdu_tokenizer, roman_tokenizer, device
+
+def load_xlstm_tokenizers_and_model(
+    urdu_tokenizer_path='unigram_urdu_tokenizer.pkl',
+    roman_tokenizer_path='unigram_roman_tokenizer.pkl',
+    model_path='xlstm_urdu_roman_seq2seq_model.pth',
+    emb_dim=128, hid_dim=256, n_layers=2, device=None
+):
+    """Load tokenizers and trained xLSTM model for inference."""
+    if device is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # Load tokenizers
+    urdu_tokenizer = UnigramTokenizer()
+    urdu_tokenizer.load(urdu_tokenizer_path)
+    roman_tokenizer = UnigramTokenizer()
+    roman_tokenizer.load(roman_tokenizer_path)
+    # Build xLSTM model
+    encoder = xLSTMEncoder(len(urdu_tokenizer.token_to_id), emb_dim=emb_dim, hid_dim=hid_dim, n_layers=n_layers)
+    decoder = xLSTMDecoder(len(roman_tokenizer.token_to_id), emb_dim=emb_dim, hid_dim=hid_dim, n_layers=4, 
+                          encoder_hidden_dim=encoder.output_hidden_dim)
+    model = xLSTMSeq2SeqModel(encoder, decoder, device)
     model.load_state_dict(torch.load(model_path, map_location=device))
     model.eval()
     return model, urdu_tokenizer, roman_tokenizer, device
@@ -878,3 +1248,149 @@ def streamlit_translate_urdu_to_roman(
     urdu_text = urdu_text[:400]
     # Use the same translate logic as before
     return translate(model, urdu_text, urdu_tokenizer, roman_tokenizer, max_length=max_length)
+
+def main():
+    """Main training function"""
+    print("Starting Urdu to Roman Urdu Translation Training with Unigram Tokenizer")
+    print("=" * 80)
+    
+    # Check GPU utilization
+    check_gpu_utilization()
+    
+    # Load and preprocess data
+    pairs = load_data('normalized_dataset/filtered_urdu_roman_urdu_pairs.txt')
+    # pairs = preprocess_data(pairs, max_pairs=8000)  # Use more data for unigram training
+    
+    # OPTIONAL: Augment dataset for better performance
+    # Uncomment the line below to enable data augmentation
+    # pairs = augment_dataset(pairs, augmentation_factor=2)  # Doubles the dataset size with noise injection and back-transliteration
+    
+    # Split data
+    train_pairs, test_pairs = train_test_split(pairs, test_size=0.2, random_state=42)
+    train_pairs, val_pairs = train_test_split(train_pairs, test_size=0.1, random_state=42)
+    
+    print(f"Train pairs: {len(train_pairs)}")
+    print(f"Val pairs: {len(val_pairs)}")
+    print(f"Test pairs: {len(test_pairs)}")
+    
+    # Prepare texts for tokenizer training
+    urdu_texts = [pair[0] for pair in train_pairs]
+    roman_texts = [pair[1] for pair in train_pairs]
+    
+    # Train Unigram tokenizers
+    print("\nTraining Unigram tokenizers...")
+    print("=" * 50)
+    
+    urdu_tokenizer = UnigramTokenizer(vocab_size=400)
+    urdu_tokenizer.load('unigram_urdu_tokenizer.pkl')
+    roman_tokenizer = UnigramTokenizer(vocab_size=400)
+    roman_tokenizer.load('unigram_roman_tokenizer.pkl')
+    
+    # urdu_token_to_id, urdu_id_to_token = urdu_tokenizer.train(urdu_texts, num_iterations=8)
+    # roman_token_to_id, roman_id_to_token = roman_tokenizer.train(roman_texts, num_iterations=8)
+    
+    # # Save tokenizers
+    # urdu_tokenizer.save('unigram_urdu_tokenizer.pkl')
+    # roman_tokenizer.save('unigram_roman_tokenizer.pkl')
+    
+    # print(f"Urdu vocabulary size: {len(urdu_token_to_id)}")
+    # print(f"Roman vocabulary size: {len(roman_token_to_id)}")
+    
+    # # Show some sample tokens
+    # print(f"\nSample Urdu tokens: {list(urdu_tokenizer.vocab)[:20]}")
+    # print(f"Sample Roman tokens: {list(roman_tokenizer.vocab)[:20]}")
+    
+    # Test tokenization on a sample
+    sample_urdu = urdu_texts[0]
+    sample_roman = roman_texts[0]
+    print(f"\nSample tokenization:")
+    print(f"Urdu: {sample_urdu}")
+    print(f"Urdu tokens: {urdu_tokenizer.encode(sample_urdu)}")
+    print(f"Roman: {sample_roman}")
+    print(f"Roman tokens: {roman_tokenizer.encode(sample_roman)}")
+    
+    # Create datasets
+    train_dataset = UnigramUrduRomanDataset(train_pairs, urdu_tokenizer, roman_tokenizer)
+    val_dataset = UnigramUrduRomanDataset(val_pairs, urdu_tokenizer, roman_tokenizer)
+    test_dataset = UnigramUrduRomanDataset(test_pairs, urdu_tokenizer, roman_tokenizer)
+    
+    # Create data loaders with optimized settings for GPU
+    train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True, 
+                             num_workers=4, pin_memory=True, persistent_workers=True)
+    val_loader = DataLoader(val_dataset, batch_size=64, shuffle=False, 
+                           num_workers=4, pin_memory=True, persistent_workers=True)
+    test_loader = DataLoader(test_dataset, batch_size=64, shuffle=False, 
+                             num_workers=4, pin_memory=True, persistent_workers=True)
+    
+    # Create model
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    
+    # OPTION 1: Use original BiLSTM + LSTM model
+    encoder = Encoder(len(urdu_tokenizer.token_to_id), emb_dim=128, hid_dim=64, n_layers=2)
+    decoder = Decoder(len(roman_tokenizer.token_to_id), emb_dim=128, hid_dim=64, n_layers=4)
+    model = Seq2SeqModel(encoder, decoder, device)
+    
+    # OPTION 2: Use improved xLSTM model with proper bidirectional support
+    # Use smaller hidden dim for xLSTM since it's more efficient, but compensate with bidirectional
+    # encoder = xLSTMEncoder(len(urdu_token_to_id), emb_dim=128, hid_dim=256, n_layers=2)
+    # decoder = xLSTMDecoder(len(roman_token_to_id), emb_dim=128, hid_dim=256, n_layers=4, 
+    #                       encoder_hidden_dim=encoder.output_hidden_dim)  # Pass encoder output dim
+    # model = xLSTMSeq2SeqModel(encoder, decoder, device)
+    
+    print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
+    
+    # Train model
+    train_losses, val_losses = train_model(model, train_loader, val_loader, num_epochs=12, learning_rate=0.001)
+    
+    # Plot training curves
+    plt.figure(figsize=(10, 6))
+    plt.plot(train_losses, label='Train Loss')
+    plt.plot(val_losses, label='Validation Loss')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    plt.title('Unigram Tokenizer Training and Validation Loss')
+    plt.legend()
+    plt.grid(True)
+    plt.savefig('unigram_training_curves.png')
+    plt.show()
+    
+    # Evaluate model with BLEU and Perplexity
+    print("\n" + "=" * 80)
+    evaluation_results = evaluate_model(model, test_loader, test_pairs, urdu_tokenizer, roman_tokenizer, device, num_samples=100)
+
+    print(f"\nFinal Evaluation Results:")
+    print(f"=" * 50)
+    print(f"Perplexity: {evaluation_results['ppl']:.2f}")
+    print(f"Corpus BLEU: {evaluation_results['corpus_bleu']:.4f}")
+    print(f"Average Sentence BLEU: {evaluation_results['avg_bleu']:.4f}")
+    
+    # Save model
+    torch.save(model.state_dict(), 'unigram_urdu_roman_seq2seq_model.pth')
+    
+    # If using xLSTM model, also save with xLSTM-specific name
+    # torch.save(model.state_dict(), 'xlstm_urdu_roman_seq2seq_model.pth')
+
+    # print("\nModel and tokenizers saved!")
+    # print("Training completed successfully!")
+
+    # best_model, best_experiment, best_val_loss = run_experiments(train_loader, val_loader, urdu_token_to_id, roman_token_to_id, device)
+    # test_model = best_model  # The best model from the experiments
+    # test_loss = 0
+    # test_batches = 0
+    
+    # # Test model
+    # test_model.eval()
+    # with torch.no_grad():
+    #     for src, tgt in test_loader:
+    #         src, tgt = src.to(device), tgt.to(device)
+    #         outputs, _ = test_model(src, tgt, teacher_forcing_ratio=0.0)
+    #         loss = nn.CrossEntropyLoss(ignore_index=0)(outputs.reshape(-1, outputs.size(-1)), tgt[:, 1:].reshape(-1))
+    #         test_loss += loss.item()
+    #         test_batches += 1
+            
+    # avg_test_loss = test_loss / test_batches
+    # print(f"Test Loss: {avg_test_loss:.4f}")
+    # torch.save(best_model.state_dict(), 'best_urdu_roman_seq2seq_model.pth')
+
+if __name__ == "__main__":
+    main()

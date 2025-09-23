@@ -1,6 +1,7 @@
 import streamlit as st
 from unigram_urdu_roman_seq2seq import (
     load_tokenizers_and_model,
+    load_xlstm_tokenizers_and_model,
     streamlit_translate_urdu_to_roman
 )
 
