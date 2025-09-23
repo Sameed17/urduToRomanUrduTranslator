@@ -755,14 +755,10 @@ def evaluate_model(model, test_loader, test_pairs, urdu_tokenizer, roman_tokeniz
     
     # Calculate average BLEU scores
     avg_bleu = np.mean(bleu_scores)
-    bleu_1 = np.mean([calculate_bleu_score(test_pairs[i][1], translate(model, test_pairs[i][0], urdu_tokenizer, roman_tokenizer), max_n=1) 
-                     for i in range(samples_to_eval)])
-    bleu_2 = np.mean([calculate_bleu_score(test_pairs[i][1], translate(model, test_pairs[i][0], urdu_tokenizer, roman_tokenizer), max_n=2) 
-                     for i in range(samples_to_eval)])
-    bleu_3 = np.mean([calculate_bleu_score(test_pairs[i][1], translate(model, test_pairs[i][0], urdu_tokenizer, roman_tokenizer), max_n=3) 
-                     for i in range(samples_to_eval)])
-    bleu_4 = np.mean([calculate_bleu_score(test_pairs[i][1], translate(model, test_pairs[i][0], urdu_tokenizer, roman_tokenizer), max_n=4) 
-                     for i in range(samples_to_eval)])
+    bleu_1 = np.mean([calculate_bleu_score(test_pairs[i][1], translate(model, test_pairs[i][0], urdu_tokenizer, roman_tokenizer), max_n=1) for i in range(samples_to_eval)])
+    bleu_2 = np.mean([calculate_bleu_score(test_pairs[i][1], translate(model, test_pairs[i][0], urdu_tokenizer, roman_tokenizer), max_n=2) for i in range(samples_to_eval)])
+    bleu_3 = np.mean([calculate_bleu_score(test_pairs[i][1], translate(model, test_pairs[i][0], urdu_tokenizer, roman_tokenizer), max_n=3) for i in range(samples_to_eval)])
+    bleu_4 = np.mean([calculate_bleu_score(test_pairs[i][1], translate(model, test_pairs[i][0], urdu_tokenizer, roman_tokenizer), max_n=4) for i in range(samples_to_eval)])
     
     
     
@@ -792,11 +788,11 @@ def run_experiments(train_loader, val_loader, urdu_token_to_id, roman_token_to_i
         }),
         ("Experiment 3", {
             "emb_src": 512, "emb_tgt": 512, "enc_hidden": 512, "dec_hidden": 512,
-            "enc_layers": 2, "dec_layers": 4, "dropout": 0.5, "batch_size": 32, "lr": 1e-4, "epochs": 5
+            "enc_layers": 4, "dec_layers": 4, "dropout": 0.5, "batch_size": 32, "lr": 1e-4, "epochs": 5
         }),
         ("Experiment 4", {
             "emb_src": 256, "emb_tgt": 256, "enc_hidden": 512, "dec_hidden": 512,
-            "enc_layers": 3, "dec_layers": 4, "dropout": 0.1, "batch_size": 32, "lr": 1e-3, "epochs": 5
+            "enc_layers": 4, "dec_layers": 4, "dropout": 0.1, "batch_size": 32, "lr": 1e-3, "epochs": 5
         }),
         ("Experiment 5", {
             "emb_src": 128, "emb_tgt": 128, "enc_hidden": 256, "dec_hidden": 256,
