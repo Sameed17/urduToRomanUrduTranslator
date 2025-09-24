@@ -1200,7 +1200,7 @@ def load_tokenizers_and_model(
     urdu_tokenizer_path='unigram_urdu_tokenizer.pkl',
     roman_tokenizer_path='unigram_roman_tokenizer.pkl',
     model_path='unigram_urdu_roman_seq2seq_model.pth',
-    emb_dim=256, hid_dim=128, n_layers=4, device=None
+    emb_dim=128, hid_dim=128, n_layers=2, device=None
 ):
     """Load tokenizers and trained model for inference.
     
@@ -1381,26 +1381,26 @@ def main():
     # torch.save(model.state_dict(), 'xlstm_urdu_roman_seq2seq_model.pth')
 
     # print("\nModel and tokenizers saved!")
-    # print("Training completed successfully!")
+    print("Training completed successfully!")
 
-    # best_model, best_experiment, best_val_loss = run_experiments(train_loader, val_loader, urdu_token_to_id, roman_token_to_id, device)
-    # test_model = best_model  # The best model from the experiments
-    # test_loss = 0
-    # test_batches = 0
+    best_model, best_experiment, best_val_loss = run_experiments(train_loader, val_loader, urdu_token_to_id, roman_token_to_id, device)
+    test_model = best_model  # The best model from the experiments
+    test_loss = 0
+    test_batches = 0
     
-    # # Test model
-    # test_model.eval()
-    # with torch.no_grad():
-    #     for src, tgt in test_loader:
-    #         src, tgt = src.to(device), tgt.to(device)
-    #         outputs, _ = test_model(src, tgt, teacher_forcing_ratio=0.0)
-    #         loss = nn.CrossEntropyLoss(ignore_index=0)(outputs.reshape(-1, outputs.size(-1)), tgt[:, 1:].reshape(-1))
-    #         test_loss += loss.item()
-    #         test_batches += 1
+    # Test model
+    test_model.eval()
+    with torch.no_grad():
+        for src, tgt in test_loader:
+            src, tgt = src.to(device), tgt.to(device)
+            outputs, _ = test_model(src, tgt, teacher_forcing_ratio=0.0)
+            loss = nn.CrossEntropyLoss(ignore_index=0)(outputs.reshape(-1, outputs.size(-1)), tgt[:, 1:].reshape(-1))
+            test_loss += loss.item()
+            test_batches += 1
             
-    # avg_test_loss = test_loss / test_batches
-    # print(f"Test Loss: {avg_test_loss:.4f}")
-    # torch.save(best_model.state_dict(), 'best_urdu_roman_seq2seq_model.pth')
+    avg_test_loss = test_loss / test_batches
+    print(f"Test Loss: {avg_test_loss:.4f}")
+    torch.save(best_model.state_dict(), 'best_urdu_roman_seq2seq_model.pth')
 
 if __name__ == "__main__":
     main()
