@@ -1200,7 +1200,7 @@ def load_tokenizers_and_model(
     urdu_tokenizer_path='unigram_urdu_tokenizer.pkl',
     roman_tokenizer_path='unigram_roman_tokenizer.pkl',
     model_path='unigram_urdu_roman_seq2seq_model.pth',
-    emb_dim=128, hid_dim=64, n_layers=2, device=None
+    emb_dim=256, hid_dim=128, n_layers=4, device=None
 ):
     """Load tokenizers and trained model for inference.
     
