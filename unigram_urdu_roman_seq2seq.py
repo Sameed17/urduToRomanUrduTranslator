@@ -791,14 +791,23 @@ def inject_noise(text, noise_prob=0.1):
     # Random character substitution
     if random.random() < 0.5:
         idx = random.randint(0, len(chars) - 1)
-        # Replace with similar character (for Roman Urdu)
+        # Replace with similar character - works for both Urdu and Roman Urdu
         similar_chars = {
+            # Roman Urdu similar characters
             'a': 'e', 'e': 'a', 'i': 'e', 'o': 'u', 'u': 'o',
             'k': 'q', 'q': 'k', 'b': 'p', 'p': 'b',
-            'd': 't', 't': 'd', 'g': 'j', 'j': 'g'
+            'd': 't', 't': 'd', 'g': 'j', 'j': 'g',
+            # Urdu similar characters (common confusions)
+            'ا': 'آ', 'آ': 'ا',  # Alif variations
+            'ی': 'ے', 'ے': 'ی',  # Ye variations
+            'ہ': 'ح', 'ح': 'ہ',  # He variations
+            'ک': 'گ', 'گ': 'ک',  # Kaf/Gaf confusion
+            'د': 'ڈ', 'ڈ': 'د',  # Dal/Dal variations
+            'ر': 'ڑ', 'ڑ': 'ر',  # Ray/Ray variations
+            'ت': 'ٹ', 'ٹ': 'ت',  # Te/Te variations
         }
-        if chars[idx].lower() in similar_chars:
-            chars[idx] = similar_chars[chars[idx].lower()]
+        if chars[idx] in similar_chars:
+            chars[idx] = similar_chars[chars[idx]]
     
     # Random character deletion
     elif random.random() < 0.3 and len(chars) > 5:
@@ -808,7 +817,8 @@ def inject_noise(text, noise_prob=0.1):
     # Random character insertion
     elif random.random() < 0.2 and len(chars) < 50:
         idx = random.randint(1, len(chars) - 1)
-        chars.insert(idx, random.choice('aeiou'))
+        # Insert common Urdu characters
+        chars.insert(idx, random.choice('اےیو'))
     
     return ''.join(chars)
 
@@ -822,10 +832,10 @@ def augment_dataset(pairs, augmentation_factor=2):
         # Add original pair
         augmented_pairs.append((urdu_text, roman_text))
         
-        # Noise injection on Roman text
-        noisy_roman = inject_noise(roman_text, noise_prob=0.15)
-        if noisy_roman != roman_text:
-            augmented_pairs.append((urdu_text, noisy_roman))
+        # Noise injection on Urdu text (input) - this makes sense for Urdu→Roman translation
+        noisy_urdu = inject_noise(urdu_text, noise_prob=0.15)
+        if noisy_urdu != urdu_text:
+            augmented_pairs.append((noisy_urdu, roman_text))
     
     # Limit augmentation to avoid too much data
     if len(augmented_pairs) > len(pairs) * augmentation_factor:
@@ -1263,7 +1273,7 @@ def main():
     
     # OPTIONAL: Augment dataset for better performance
     # Uncomment the line below to enable data augmentation
-    # pairs = augment_dataset(pairs, augmentation_factor=2)  # Doubles the dataset size with noise injection and back-transliteration
+    pairs = augment_dataset(pairs, augmentation_factor=2)  # Doubles the dataset size with noise injection and back-transliteration
     
     # Split data
     train_pairs, test_pairs = train_test_split(pairs, test_size=0.2, random_state=42)
@@ -1326,21 +1336,21 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
     # OPTION 1: Use original BiLSTM + LSTM model
-    encoder = Encoder(len(urdu_tokenizer.token_to_id), emb_dim=128, hid_dim=64, n_layers=2)
-    decoder = Decoder(len(roman_tokenizer.token_to_id), emb_dim=128, hid_dim=64, n_layers=4)
+    encoder = Encoder(len(urdu_tokenizer.token_to_id), emb_dim=128, hid_dim=128, n_layers=2)
+    decoder = Decoder(len(roman_tokenizer.token_to_id), emb_dim=128, hid_dim=128, n_layers=4)
     model = Seq2SeqModel(encoder, decoder, device)
     
     # OPTION 2: Use improved xLSTM model with proper bidirectional support
     # Use smaller hidden dim for xLSTM since it's more efficient, but compensate with bidirectional
-    # encoder = xLSTMEncoder(len(urdu_token_to_id), emb_dim=128, hid_dim=256, n_layers=2)
-    # decoder = xLSTMDecoder(len(roman_token_to_id), emb_dim=128, hid_dim=256, n_layers=4, 
+    # encoder = xLSTMEncoder(len(urdu_tokenizer.token_to_id), emb_dim=128, hid_dim=128, n_layers=2)
+    # decoder = xLSTMDecoder(len(roman_tokenizer.token_to_id), emb_dim=128, hid_dim=128, n_layers=4, 
     #                       encoder_hidden_dim=encoder.output_hidden_dim)  # Pass encoder output dim
     # model = xLSTMSeq2SeqModel(encoder, decoder, device)
     
     print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
     
     # Train model
-    train_losses, val_losses = train_model(model, train_loader, val_loader, num_epochs=12, learning_rate=0.001)
+    train_losses, val_losses = train_model(model, train_loader, val_loader, num_epochs=15, learning_rate=0.001)
     
     # Plot training curves
     plt.figure(figsize=(10, 6))

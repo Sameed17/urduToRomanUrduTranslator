@@ -1,0 +1,26 @@
+# Core ML/DL libraries
+torch>=2.0.0
+torchvision>=0.15.0
+torchaudio>=2.0.0
+
+# Data processing and ML utilities
+numpy>=1.21.0
+scikit-learn>=1.0.0
+matplotlib>=3.5.0
+
+# NLP libraries
+nltk>=3.8.0
+
+# Web app framework
+streamlit>=1.28.0
+
+# Additional utilities
+pickle-mixin>=1.0.2
+
+# Optional: For better performance
+# accelerate>=0.20.0  # Uncomment if using GPU acceleration
+# transformers>=4.20.0  # Uncomment if using transformer models
+
+# Development dependencies (optional)
+# jupyter>=1.0.0
+# ipykernel>=6.0.0
